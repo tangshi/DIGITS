@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 import random
+import base64
 
 import flask
 import werkzeug.exceptions
@@ -281,7 +282,119 @@ def image_classification_model_classify_one():
                 predictions     = predictions,
                 visualizations  = visualizations,
                 )
+                
+@app.route(NAMESPACE + '/classify_one/<job_id>.json', methods=['POST'])
+def image_classification_model_classify_one_json():
+    """
+    Classify one image and return the top 5 classifications
 
+    Returns JSON when requested: {predictions: {category: confidence,...}}
+    """
+    job = job_from_request()
+  
+    jsondata = request.get_json(force=True)
+    image = None
+    if 'image' in jsondata:
+        imagedata = base64.b64decode(jsondata['image'])
+        path = os.getcwd()
+        if (not path.endswith("/")):
+            path = path + '/'
+        path = path + 'tmp'
+        
+        if not os.path.exists(path):
+            os.makedirs(path) 
+        file = open( path + '/image.tmp', "wb")
+        file.write(imagedata)
+        file.flush()
+        file.close()
+        image = utils.image.load_image(file.name)
+    else:
+        raise werkzeug.exceptions.BadRequest('must provide image')
+
+    # resize image
+    db_task = job.train_task().dataset.train_db_task()
+    height = db_task.image_dims[0]
+    width = db_task.image_dims[1]
+    if job.train_task().crop_size:
+        height = job.train_task().crop_size
+        width = job.train_task().crop_size
+    image = utils.image.resize_image(image, height, width,
+            channels = db_task.image_dims[2],
+            resize_mode = db_task.resize_mode,
+            )
+
+    epoch = None
+    if 'snapshot_epoch' in flask.request.form:
+        epoch = float(flask.request.form['snapshot_epoch'])
+
+    layers = 'none'
+    if 'show_visualizations' in flask.request.form and flask.request.form['show_visualizations']:
+        layers = 'all'
+
+    predictions, visualizations = job.train_task().infer_one(image, snapshot_epoch=epoch, layers=layers)
+    # take top 5
+    predictions = [(p[0], round(100.0*p[1],2)) for p in predictions[:5]]
+
+    return flask.jsonify({'predictions': predictions})
+
+
+@app.route(NAMESPACE + '/classify_many/<job_id>.json', methods=['POST'])
+def image_classification_model_classify_many_json():
+    """
+    Classify many images and return the top 5 classifications for each
+
+    Returns JSON when requested: {classifications: {filename: [[category,confidence],...],...}}
+    """
+    job = job_from_request()
+    
+    jsondata = request.get_json(force=True)
+    image_number = jsondata['images_number']
+    
+    if image_number:
+        path = os.getcwd()
+        if (not path.endswith("/")):
+            path = path + '/'
+        path = path + 'tmp'
+        if not os.path.exists(path):
+            os.makedirs(path)
+             
+        images = []
+        dataset = job.train_task().dataset
+        
+        for i in range(image_number):
+            imagedata = base64.b64decode(jsondata['image_'+str(i)])
+            file = open( path + '/image.tmp', "wb")
+            file.write(imagedata)
+            file.flush()
+            file.close()
+            image = utils.image.load_image(file.name)
+            image = utils.image.resize_image(image,
+                    dataset.image_dims[0], dataset.image_dims[1],
+                    channels    = dataset.image_dims[2],
+                    resize_mode = dataset.resize_mode,
+                    )
+            images.append(image)        
+    else:
+        raise werkzeug.exceptions.BadRequest('require images')
+
+    labels, scores = job.train_task().infer_many(images)
+    if scores is None:
+        raise RuntimeError('An error occured while processing the images')
+
+    # take top 5
+    indices = (-scores).argsort()[:, :5]
+
+    classifications = []
+    for image_index, index_list in enumerate(indices):
+        result = []
+        for i in index_list:
+            # `i` is a category in labels and also an index into scores
+            result.append((labels[i], round(100.0*scores[image_index, i],2)))
+        classifications.append(result)
+
+    joined = dict(zip(paths, classifications))
+    return flask.jsonify({'classifications': joined})
+                                
 @app.route(NAMESPACE + '/classify_many.json', methods=['POST'])
 @app.route(NAMESPACE + '/classify_many', methods=['POST', 'GET'])
 @autodoc(['models', 'api'])
@@ -356,7 +469,7 @@ def image_classification_model_classify_many():
         return flask.render_template('models/images/classification/classify_many.html',
                 paths=paths,
                 classifications=classifications,
-                )
+                )             
 
 @app.route(NAMESPACE + '/top_n', methods=['POST'])
 @autodoc('models')
