@@ -7,6 +7,7 @@ import random
 import base64
 
 import flask
+from flask import request
 import werkzeug.exceptions
 import numpy as np
 from google.protobuf import text_format
@@ -284,13 +285,15 @@ def image_classification_model_classify_one():
                 )
                 
 @app.route(NAMESPACE + '/classify_one/<job_id>.json', methods=['POST'])
-def image_classification_model_classify_one_json():
+def image_classification_model_classify_one_json(job_id):
     """
     Classify one image and return the top 5 classifications
 
     Returns JSON when requested: {predictions: {category: confidence,...}}
     """
-    job = job_from_request()
+    job = scheduler.get_job(job_id)
+    if job is None:
+        raise werkzeug.exceptions.NotFound('Job not found')
   
     jsondata = request.get_json(force=True)
     image = None
@@ -339,14 +342,16 @@ def image_classification_model_classify_one_json():
 
 
 @app.route(NAMESPACE + '/classify_many/<job_id>.json', methods=['POST'])
-def image_classification_model_classify_many_json():
+def image_classification_model_classify_many_json(job_id):
     """
     Classify many images and return the top 5 classifications for each
 
     Returns JSON when requested: {classifications: {filename: [[category,confidence],...],...}}
     """
-    job = job_from_request()
-    
+    job = scheduler.get_job(job_id)
+    if job is None:
+        raise werkzeug.exceptions.NotFound('Job not found')
+
     jsondata = request.get_json(force=True)
     image_number = jsondata['images_number']
     
@@ -357,7 +362,8 @@ def image_classification_model_classify_many_json():
         path = path + 'tmp'
         if not os.path.exists(path):
             os.makedirs(path)
-             
+        
+        paths = []     
         images = []
         dataset = job.train_task().dataset
         
@@ -373,6 +379,7 @@ def image_classification_model_classify_many_json():
                     channels    = dataset.image_dims[2],
                     resize_mode = dataset.resize_mode,
                     )
+            paths.append(jsondata['image_path_'+str(i)])        
             images.append(image)        
     else:
         raise werkzeug.exceptions.BadRequest('require images')
